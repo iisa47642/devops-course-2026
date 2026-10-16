@@ -119,10 +119,106 @@ hostname -f
 
 13. С Mac проверить `ssh devops.local`. Передать скрипт аудита на сервер и выполнить `bash scripts/audit.sh; echo $?`. Ожидаются шесть успешных проверок и код 0.
 
-Эта последовательность записана по выполненным действиям. Полный откат и восстановление с секундомером в данной работе не проводились.
+Эта последовательность записана по выполненным действиям. В ПР № 5 полный откат с секундомером не проводился. При подготовке ПР № 6 (16.10.2026) выполнен откат на 01-clean-install и повторная настройка по этой последовательности. Команды были заранее собраны в сценарий: от начала отката до итогового входа по SSH прошло 42,9 с; аудит показал 6 OK, exit=0. Это замер автоматизированного выполнения, а не ручного ввода команд. Текущее состояние перед откатом сохранено в before-practice6.
 
 ## Проверка аудита
 
 На рабочей конфигурации: 6 OK, exit=0. Для отрицательной проверки в файле SSH временно установлено MaxAuthTries 10: 5 OK, 1 FAIL, exit=1. Затем исходный файл восстановлен, `sshd -t` прошёл, повторный аудит вернул 0. Служба при временном изменении не перезапускалась: скрипт проверяет конфигурацию на диске через sshd -T.
 
 Аудит не заменяет отдельную проверку слушающего сокета, нового соединения, правил LIMIT и доступности DNS. Эти проверки выполнены отдельно.
+
+
+## 8. Веб-сервер
+
+Установлены nginx 1.24.0 из репозитория Ubuntu и rsync. Сайт доступен с Mac по `https://devops.local` через Host-only 192.168.56.101. Запись в `/etc/hosts` сделана на Mac; в Ubuntu для локальных проверок использован localhost с Host: devops.local.
+
+```bash
+sudo apt update
+sudo apt install -y nginx rsync
+sudo install -d -m 755 -o devops -g devops /var/www/devops-site
+```
+
+Каталог `/var/www/devops-site` принадлежит devops:devops (755), HTML-файлы — тому же пользователю (644). www-data читает файлы, но не может их менять. Конфигурация — `/etc/nginx/sites-available/devops-site`; в sites-enabled находится ссылка с тем же именем. Ссылка default удалена; исходный файл default сохранён.
+
+Сертификат `/etc/ssl/certs/devops.crt` имеет владельца root:root и права 644; закрытый ключ `/etc/ssl/private/devops.key` — root:root, 600. Создание:
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key \
+  -out /etc/ssl/certs/devops.crt \
+  -subj '/CN=devops.local' -addext 'subjectAltName=DNS:devops.local'
+sudo chmod 600 /etc/ssl/private/devops.key
+sudo chmod 644 /etc/ssl/certs/devops.crt
+```
+
+Срок: 16.10.2026 18:03:04 UTC — 16.10.2027 18:03:04 UTC. Повторный выпуск создаст другой сертификат: его открытую часть потребуется заново скопировать клиенту через проверенный SSH. Закрытый ключ остаётся на Ubuntu.
+
+Конфигурация `configs/devops-site.conf`:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name devops.local;
+    access_log /var/log/nginx/devops-site.access.log;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name devops.local;
+    ssl_certificate /etc/ssl/certs/devops.crt;
+    ssl_certificate_key /etc/ssl/private/devops.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /var/www/devops-site;
+    index index.html;
+    location / { try_files $uri $uri/ =404; }
+    error_page 404 /404.html;
+    access_log /var/log/nginx/devops-site.access.log;
+    error_log /var/log/nginx/devops-site.error.log;
+}
+```
+
+Установка конфигурации после её передачи на VM:
+
+```bash
+sudo cp devops-site.conf /etc/nginx/sites-available/devops-site
+sudo ln -sfn /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/devops-site
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+HSTS в учебной конфигурации не включён. Журнал HTTP-редиректов записывается в тот же devops-site.access.log, что и HTTPS, чтобы распределение кодов учитывало 301.
+
+С Mac сертификат получен по проверенному SSH. Проверки без отключения доверия:
+
+```bash
+ssh devops 'cat /etc/ssl/certs/devops.crt' > ~/devops.crt
+curl -I http://devops.local
+curl --cacert ~/devops.crt -I https://devops.local
+openssl x509 -in ~/devops.crt -noout -dates -ext subjectAltName
+```
+
+Снимок `04-nginx-https` создан на выключенной VM. Вместе с диском сохранены config.plist и EFI в каталоге checkpoints, как описано выше.
+
+### Доставка с Mac
+
+Встроенный rsync 2.6.9 не принял `--chmod=D755,F644`, поэтому установлен rsync 3.5.0 через Homebrew (`brew install rsync`). В PATH первым должен быть `/opt/homebrew/bin`. На Mac используется Bash 3.2; скрипт совместим с ним.
+
+```bash
+scripts/deploy.sh --dry-run
+scripts/deploy.sh
+```
+
+Запуск допустим из любого каталога репозитория. Нужны работающий `ssh devops`, rsync 3 и `~/devops.crt`. Скрипт проверяет index.html и чистое состояние Git, выполняет один rsync через SSH, затем curl с проверкой сертификата. SSH использует BatchMode=yes и ConnectTimeout=5. Для HTTPS connect-timeout=10, max-time=20: разрешение локального имени на этом Mac занимало около 5 секунд. Успех — 0 и короткий хеш коммита; ошибка — 1. При dry-run запрос HTTPS не выполняется.
+
+Пять сценариев проверены: dry-run 0, доставленный коммит 0, незакоммиченный или staged файл 1, остановленный nginx 1, переименованный и закоммиченный index.html 1. После опытов главная страница и Nginx восстановлены.
+
+Обычный rsync сравнивает размер и mtime. Он исправил выполненную в работе подмену, но не гарантирует обнаружение правки с сохранением размера и времени; для такой проверки нужен `--checksum`. Доставка в рабочий каталог не атомарна.
+
+### Аудит и подготовка следующей практики
+
+В scripts/audit.sh добавлены четыре проверки: активность nginx, nginx -t, остаток срока сертификата не менее 30 дней, отсутствие world-writable объектов и права ключа 600. Отрицательные проверки: порог срока 400 дней и права index.html 666. После восстановления ожидаются 10 OK и код 0.
+
+Docker Engine установлен из официального apt-репозитория Docker, пользователь devops добавлен в docker; после нового входа выполнен `docker run --rm hello-world`. Членство в docker фактически даёт полномочия root через демон; это учебная VM. Контейнеры с опубликованными портами пока не запускаются. При их добавлении нужно отдельно учитывать взаимодействие Docker и UFW.
