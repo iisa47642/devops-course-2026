@@ -40,7 +40,7 @@ if [[ "$DRY_RUN" == true ]]; then
     echo "План для коммита $COMMIT. Файлы не изменены."
     exit 0
 fi
-if ! curl -fsS --connect-timeout 5 --max-time 15 \
+if ! curl -fsS --connect-timeout 10 --max-time 20 \
     --cacert "$CA_CERT" "$SITE_URL/" -o /dev/null; then
     echo "Ошибка: сайт недоступен или сертификат не прошёл проверку" >&2
     exit 1
