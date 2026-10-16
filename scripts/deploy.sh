@@ -9,14 +9,16 @@ CA_CERT="${HOME}/devops.crt"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 LOCAL_DIR="$ROOT/site/"
-DRY_RUN=()
+DRY_RUN=false
+ARGS=(-avz --delete --chmod=D755,F644)
 
 if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--dry-run" ) ]]; then
     echo "Использование: scripts/deploy.sh [--dry-run]" >&2
     exit 1
 fi
 if [[ $# -eq 1 ]]; then
-    DRY_RUN=(--dry-run)
+    DRY_RUN=true
+    ARGS+=(--dry-run)
 fi
 if [[ ! -f "${LOCAL_DIR}index.html" ]]; then
     echo "Ошибка: нет site/index.html" >&2
@@ -28,13 +30,13 @@ if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
 fi
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
 
-if ! rsync -avz --delete --chmod=D755,F644 "${DRY_RUN[@]}" \
+if ! rsync "${ARGS[@]}" \
     -e "ssh -o BatchMode=yes -o ConnectTimeout=5" \
     "$LOCAL_DIR" "$REMOTE:$REMOTE_DIR/"; then
     echo "Ошибка доставки" >&2
     exit 1
 fi
-if [[ ${#DRY_RUN[@]} -gt 0 ]]; then
+if [[ "$DRY_RUN" == true ]]; then
     echo "План для коммита $COMMIT. Файлы не изменены."
     exit 0
 fi
