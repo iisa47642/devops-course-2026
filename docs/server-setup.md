@@ -153,7 +153,7 @@ sudo chmod 644 /etc/ssl/certs/devops.crt
 
 Срок: 16.10.2026 18:03:04 UTC — 16.10.2027 18:03:04 UTC. Повторный выпуск создаст другой сертификат: его открытую часть потребуется заново скопировать клиенту через проверенный SSH. Закрытый ключ остаётся на Ubuntu.
 
-Конфигурация `configs/devops-site.conf`:
+Конфигурация на этапе ПР № 6 (в актуальном `configs/devops-site.conf` также есть /app/ из раздела 9):
 
 ```nginx
 server {
@@ -221,4 +221,118 @@ scripts/deploy.sh
 
 В scripts/audit.sh добавлены четыре проверки: активность nginx, nginx -t, остаток срока сертификата не менее 30 дней, отсутствие world-writable объектов и права ключа 600. Отрицательные проверки: порог срока 400 дней и права index.html 666. После восстановления ожидаются 10 OK и код 0.
 
-Docker Engine установлен из официального apt-репозитория Docker, пользователь devops добавлен в docker; после нового входа выполнен `docker run --rm hello-world`. Членство в docker фактически даёт полномочия root через демон; это учебная VM. Контейнеры с опубликованными портами пока не запускаются. При их добавлении нужно отдельно учитывать взаимодействие Docker и UFW.
+Docker Engine установлен из официального apt-репозитория Docker, пользователь devops добавлен в docker; после нового входа выполнен `docker run --rm hello-world`. Членство в docker фактически даёт полномочия root через демон; это учебная VM. В ПР № 7 добавлены контейнеры и проверка взаимодействия Docker с UFW; актуальные настройки приведены в разделе 9.
+
+
+## 9. Контейнеризация
+
+### Docker и доступ
+
+Docker Engine 29.9.1 и Compose v5.6.0 установлены из официального apt-репозитория Docker на Ubuntu 24.04 ARM64. В группе docker находится devops. После добавления в группу выполнен новый вход по SSH. Членство в docker даёт административные возможности через демон root.
+
+Для установки на восстановленной Ubuntu (команды выполняются на VM):
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<'SOURCES'
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+Architectures: arm64
+Signed-By: /etc/apt/keyrings/docker.asc
+SOURCES
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker devops
+```
+
+Затем выйти и войти снова: `ssh devops`. Проверить `docker version`, `docker compose version`, `docker run --rm hello-world`. Команды apt устанавливают доступную версию; фактически проверенные версии указаны выше. Инструкция рассчитана на нашу Ubuntu noble ARM64.
+
+### Проект и переменные
+
+Исходники находятся на Mac в `/Users/isaevisa/IdeaProjects/devops-course-2026/app`, рабочая копия на VM — `/home/devops/app`. Из корня репозитория на Mac:
+
+```bash
+rsync -avz --delete --exclude=.env --dry-run app/ devops:app/
+rsync -avz --delete --exclude=.env app/ devops:app/
+rsync -avz scripts/ devops:devops-course-2026/scripts/
+rsync -avz configs/devops-site.conf devops:devops-site.conf
+```
+
+Исключение .env защищает файл на принимающей стороне от --delete. .gitignore исключает его из Git, .dockerignore — из контекста сборки. В репозитории хранится только `.env.example` с заменителем пароля.
+
+Только при первом развёртывании на VM создать `.env` (если файл уже есть, его не заменять):
+
+```bash
+cd ~/app
+umask 077
+cp .env.example .env
+chmod 600 .env
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+```
+
+Файл `/home/devops/app/.env`, владелец devops:devops, права 600. DB_HOST=db; POSTGRES_DB=app; POSTGRES_USER=app. Пароль сгенерирован на VM. Содержимое .env не выводится в отчёт. env_file передаёт значения в окружение процессов, не копирует файл внутрь образа. При существующем томе смена POSTGRES_PASSWORD в файле сама по себе не меняет пароль в PostgreSQL.
+
+### Запуск, сеть и данные
+
+На VM:
+
+```bash
+cd ~/app
+docker compose config --quiet
+docker compose up -d --build --wait
+docker compose ps
+docker compose exec app id
+docker compose exec app getent hosts db
+curl --retry 5 --retry-all-errors --retry-delay 1 \
+  -fsS http://127.0.0.1:5000/health
+curl -fsS http://127.0.0.1:5000/
+```
+
+Compose создаёт app-app-1 и app-db-1, сеть app_backend и том app_db_data. Gunicorn запускается от app (UID 999), код принадлежит root и имеет права 644. db использует postgres:16-alpine и healthcheck pg_isready; app ждёт service_healthy. У приложения собственного healthcheck нет: /health отдельно проверяется curl. Обе службы используют restart: unless-stopped.
+
+Публикация приложения: `127.0.0.1:5000:5000`. Порт 5432 PostgreSQL не публикуется; соединение app → db:5432 проходит внутри app_backend. EXPOSE 5000 сам по себе не открывает порт хоста. Проверки: `ss -tln`, `docker inspect -f '{{json .NetworkSettings.Ports}}' app-db-1`. У db ожидается {"5432/tcp":null}.
+
+Том app_db_data подключён к /var/lib/postgresql/data. down сохраняет том: в опыте счётчик продолжился с 6 до 7. down -v удалил учебный том, после повторного up счётчик начался с 1. Перед этим сохранён SQL-файл ~/backups/practice7-before-volume-reset.sql на VM. Для обычного перезапуска down -v не используется.
+
+### Nginx и HTTPS
+
+В HTTPS-блок `/etc/nginx/sites-available/devops-site` добавлено:
+
+```nginx
+location /app/ {
+    proxy_pass http://127.0.0.1:5000/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Конечный слеш у proxy_pass заменяет /app/ на / при передаче запроса: /app/health становится /health. Остальной конфиг и статический сайт сохранены. Установить переданный конфиг: `sudo cp ~/devops-site.conf /etc/nginx/sites-available/devops-site`, затем `sudo nginx -t && sudo systemctl reload nginx`. Предыдущая версия сохранена в /var/backups/devops-site-practice6.conf.
+
+На Mac:
+
+```bash
+curl --cacert ~/devops.crt https://devops.local/app/
+curl --cacert ~/devops.crt https://devops.local/app/health
+curl --cacert ~/devops.crt -I https://devops.local/
+```
+
+Ожидаются приветствие со счётчиком, ok и 200 OK. TLS завершается на Nginx; до Gunicorn используется HTTP на loopback. Статическая страница / остаётся доступной. Внешние подключения к 5000 и 5432 закрыты. Во временном опыте -p 5001:5000 был доступен с Mac, хотя UFW его не разрешал: Docker создал DNAT и правила пересылки. Тестовый контейнер удалён.
+
+### Аудит и восстановление
+
+`bash ~/devops-course-2026/scripts/audit.sh; echo $?` на VM: 14 OK, код 0. Новый раздел проверяет активность Docker, healthy у app-db-1, отсутствие внешних слушателей 5000/5432 и права .env 600. При временной публикации 5000:5000 получены 13 OK, 1 FAIL, код 1. Затем возвращён 127.0.0.1:5000:5000 и успешная проверка.
+
+При 502 проверить compose ps, локальный /health, compose logs app, ss -tln, proxy_pass и /var/log/nginx/devops-site.error.log. При остановленном app в журнале было Connection refused. `docker compose start app` и ожидание успешного /health восстановили HTTPS. Завершение команды start ещё не гарантирует готовность Gunicorn.
+
+Снимок 05-docker-compose создан после штатного выключения VM; вместе с QCOW2 сохранены config.plist и EFI в devops-checkpoints/05-docker-compose. Снимок 04-nginx-https сохранён. Порядок отката описан выше. После отката к 01-clean-install последовательно выполнить разделы настройки SSH/UFW, раздел 8 и раздел 9; создать новую .env, передать проект, запустить Compose и аудит. Снимок содержит учебную базу и .env, поэтому не предназначен для публичной загрузки.

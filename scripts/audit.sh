@@ -59,5 +59,19 @@ if [[ -d /var/www/devops-site ]] && \
     [[ -z "$WRITABLE" && "$KEY_MODE" == 600 ]] && RIGHTS_OK=yes
 fi
 check 'Site has no world-writable files and key is 600' yes "$RIGHTS_OK"
+echo '[5] Containerization'
+check 'Docker is active' active "$(systemctl is-active docker)"
+DB_HEALTH=$(docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null) || DB_HEALTH=missing
+check 'Database container is healthy' healthy "$DB_HEALTH"
+PORTS_OK=no
+if SOCKETS=$(ss -tln); then
+    PORTS_OK=$(awk '
+        NR>1 && $4 ~ /:(5000|5432)$/ && $4 !~ /^127\.0\.0\.1:/ {bad=1}
+        END {print bad ? "no" : "yes"}
+    ' <<< "$SOCKETS")
+fi
+check 'Ports 5000 and 5432 are not exposed to the network' yes "$PORTS_OK"
+ENV_MODE=$(stat -c '%a' "$HOME/app/.env" 2>/dev/null) || ENV_MODE=missing
+check 'Application .env has mode 600' 600 "$ENV_MODE"
 echo "Passed: $PASS, failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]
