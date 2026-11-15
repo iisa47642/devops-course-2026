@@ -1,0 +1,15 @@
+---
+- name: Configure and deploy devops VM
+  hosts: vm
+  become: true
+  pre_tasks:
+    - name: Check that a full image tag is selected
+      ansible.builtin.assert:
+        that:
+          - app_tag is match('^[0-9a-f]{40}$')
+        fail_msg: "Укажите полный SHA опубликованного образа из ПР 10"
+  roles:
+    - base
+    - ssh
+    - nginx
+    - app

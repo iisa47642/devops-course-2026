@@ -336,3 +336,35 @@ curl --cacert ~/devops.crt -I https://devops.local/
 При 502 проверить compose ps, локальный /health, compose logs app, ss -tln, proxy_pass и /var/log/nginx/devops-site.error.log. При остановленном app в журнале было Connection refused. `docker compose start app` и ожидание успешного /health восстановили HTTPS. Завершение команды start ещё не гарантирует готовность Gunicorn.
 
 Снимок 05-docker-compose создан после штатного выключения VM; вместе с QCOW2 сохранены config.plist и EFI в devops-checkpoints/05-docker-compose. Снимок 04-nginx-https сохранён. Порядок отката описан выше. После отката к 01-clean-install последовательно выполнить разделы настройки SSH/UFW, раздел 8 и раздел 9; создать новую .env, передать проект, запустить Compose и аудит. Снимок содержит учебную базу и .env, поэтому не предназначен для публичной загрузки.
+
+
+## 10. Ansible
+
+Для ПР 11 использовал отдельный клон `devops-ansible` в UTM, восстановленный из `01-clean-install`. Исходная `devops-vm` с прежними работами сохранена. У клона другой UUID, MAC и Host-only адрес `192.168.56.102`. SSH остаётся на 22, HTTP — на 80. Пробросы на Mac: `127.0.0.1:2223 → 22` и `127.0.0.1:8081 → 80`. Вход: `ssh devops-ansible`. Старый `ssh devops` по-прежнему относится к исходной VM.
+
+Управляющий узел — Mac, управляемый — Ubuntu Server 24.04 ARM64. В роли `base` архитектура Docker-репозитория выбирается по фактам: `aarch64 → arm64`, `x86_64 → amd64`.
+
+Проект находится в каталоге `ansible/` этого репозитория. `inventory/bootstrap.ini` использует `student` и пароль, `inventory/prod.ini` — `devops` и `~/.ssh/devops_vm`. Пароли и закрытые ключи в Git не добавлены.
+
+Роли:
+
+- `base`: пакеты, официальный репозиторий Docker, служба Docker;
+- `ssh`: пользователь devops, открытый ключ, sudo, настройки SSH и UFW;
+- `nginx`: прокси с порта 80 на `127.0.0.1:5000`;
+- `app`: загрузка образа, запуск контейнера и проверка `/health`.
+
+Образ: `ghcr.io/iisa47642/devops-ci-app:b2cfcd4228601eaa15f1cf9ea89ebd1fc91f0ce1`. Полный SHA задан в `group_vars/all.yml`. Приложение собрано в CI из ПР 10 для ARM64. На VM сборка не выполняется. GHCR-пакет открыт для чтения, поэтому при загрузке образа docker login не требуется.
+
+Команды выполняются из каталога `ansible` после активации окружения Python с Ansible:
+
+```bash
+ansible-playbook -i inventory/bootstrap.ini site.yml --ask-pass --ask-become-pass
+ansible all -m ping
+ansible-playbook site.yml
+ansible-playbook verify.yml
+curl --fail http://192.168.56.102/health
+```
+
+Первый запуск создаёт доступ по ключу. После него парольная аутентификация отключена, а `sudo -n true` работает для devops. Повторный запуск не требует пароля. В `ansible.cfg` включён `force_handlers`, чтобы изменения SSH и Nginx применялись даже при поздней ошибке загрузки образа.
+
+Подробные команды запуска двух VM и показа восстановления находятся в `ansible/README.md`.

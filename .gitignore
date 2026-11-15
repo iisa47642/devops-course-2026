@@ -6,3 +6,5 @@
 *.iso
 *.utm/
 .env
+ansible/.venv
+*.retry
